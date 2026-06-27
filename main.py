@@ -1,7 +1,9 @@
 import sys
+from pydantic import validate_call
 
 from metadata import process_image
 
+@validate_call
 def main() -> None:
     if len(sys.argv) < 2:
         print("Usage: python image_metadata.py <path-or-smb-url> [...]")

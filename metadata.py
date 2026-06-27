@@ -17,15 +17,29 @@ import sys
 import socket
 from datetime import datetime
 from urllib.parse import urlparse, unquote
+from typing import Any
+from pydantic import validate_call, ConfigDict
 
 from PIL import Image
 from PIL.ExifTags import TAGS, GPSTAGS
 from geopy.geocoders import Nominatim
 from geopy.exc import GeocoderTimedOut, GeocoderServiceError
 
+try:
+    from smb.SMBConnection import SMBConnection
+    HAS_PYSMB = True
+except ImportError:
+    class SMBConnection:
+        pass
+    HAS_PYSMB = False
+
+# Decorator to validate call arguments and return values with arbitrary type support
+v_call = validate_call(config=ConfigDict(arbitrary_types_allowed=True), validate_return=True)
+
 
 # ── SMB ───────────────────────────────────────────────────────────────────────
 
+@v_call
 def read_smb_file(smb_url: str) -> io.BytesIO:
     """
     Parse an smb:// URL and return the remote file as an in-memory BytesIO buffer.
@@ -33,9 +47,7 @@ def read_smb_file(smb_url: str) -> io.BytesIO:
 
     URL format:  smb://hostname/share/path/to/file.jpg
     """
-    try:
-        from smb.SMBConnection import SMBConnection
-    except ImportError:
+    if not HAS_PYSMB:
         raise ImportError("pysmb is not installed. Run: pip install pysmb")
 
     parsed = urlparse(smb_url)
@@ -85,6 +97,7 @@ def read_smb_file(smb_url: str) -> io.BytesIO:
 
 # ── Image loading ─────────────────────────────────────────────────────────────
 
+@v_call
 def open_image(path_or_url: str) -> Image.Image:
     """Open an image from a local path or an smb:// URL."""
     if path_or_url.lower().startswith("smb://"):
@@ -96,7 +109,8 @@ def open_image(path_or_url: str) -> Image.Image:
 
 # ── EXIF helpers ──────────────────────────────────────────────────────────────
 
-def get_exif_data(img: Image.Image) -> dict:
+@v_call
+def get_exif_data(img: Image.Image) -> dict[str | int, Any]:
     """Return a dict of human-readable EXIF tag → value."""
     raw_exif = img._getexif()
     if raw_exif is None:
@@ -104,7 +118,8 @@ def get_exif_data(img: Image.Image) -> dict:
     return {TAGS.get(tag_id, tag_id): value for tag_id, value in raw_exif.items()}
 
 
-def get_timestamp(exif: dict) -> datetime | None:
+@v_call
+def get_timestamp(exif: dict[str | int, Any]) -> datetime | None:
     """
     Pull the capture time from the EXIF block.
     Prefers DateTimeOriginal → DateTimeDigitized → DateTime.
@@ -113,7 +128,7 @@ def get_timestamp(exif: dict) -> datetime | None:
         raw = exif.get(key)
         if raw:
             try:
-                return datetime.strptime(raw, "%Y:%m:%d %H:%M:%S")
+                return datetime.strptime(str(raw), "%Y:%m:%d %H:%M:%S")
             except ValueError:
                 pass
     return None
@@ -121,7 +136,8 @@ def get_timestamp(exif: dict) -> datetime | None:
 
 # ── GPS helpers ───────────────────────────────────────────────────────────────
 
-def _dms_to_decimal(dms_tuple, ref: str) -> float:
+@v_call
+def _dms_to_decimal(dms_tuple: tuple[float, float, float] | list[float], ref: str) -> float:
     """Convert degrees/minutes/seconds (as rationals) + hemisphere ref to decimal degrees."""
     degrees, minutes, seconds = dms_tuple
     decimal = float(degrees) + float(minutes) / 60 + float(seconds) / 3600
@@ -130,7 +146,8 @@ def _dms_to_decimal(dms_tuple, ref: str) -> float:
     return decimal
 
 
-def get_gps_coords(exif: dict) -> tuple[float, float] | None:
+@v_call
+def get_gps_coords(exif: dict[str | int, Any]) -> tuple[float, float] | None:
     """Return (latitude, longitude) in decimal degrees, or None if GPS data is absent."""
     gps_raw = exif.get("GPSInfo")
     if not gps_raw:
@@ -146,14 +163,21 @@ def get_gps_coords(exif: dict) -> tuple[float, float] | None:
     if not all([lat_dms, lat_ref, lon_dms, lon_ref]):
         return None
 
-    return (
-        _dms_to_decimal(lat_dms, lat_ref),
-        _dms_to_decimal(lon_dms, lon_ref),
-    )
+    # Cast to standard lists or tuples for validation/unpacking if necessary
+    try:
+        lat_dms_seq = list(lat_dms) if isinstance(lat_dms, (list, tuple)) else lat_dms
+        lon_dms_seq = list(lon_dms) if isinstance(lon_dms, (list, tuple)) else lon_dms
+        return (
+            _dms_to_decimal(lat_dms_seq, str(lat_ref)),
+            _dms_to_decimal(lon_dms_seq, str(lon_ref)),
+        )
+    except Exception:
+        return None
 
 
 # ── Reverse geocoding ─────────────────────────────────────────────────────────
 
+@v_call
 def coords_to_city(lat: float, lon: float) -> str | None:
     """Reverse-geocode coordinates to a city name via Nominatim (no API key needed)."""
     geolocator = Nominatim(user_agent="image_metadata_reader/1.0")
@@ -177,6 +201,7 @@ def coords_to_city(lat: float, lon: float) -> str | None:
 
 # ── Main ──────────────────────────────────────────────────────────────────────
 
+@v_call
 def process_image(path_or_url: str) -> None:
     print(f"\n📷  {path_or_url}")
     print("─" * 60)
@@ -210,4 +235,5 @@ def process_image(path_or_url: str) -> None:
     else:
         print("  GPS       : no GPS data embedded in this image")
         print("  City      : n/a")
+
 
