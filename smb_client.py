@@ -34,6 +34,34 @@ MEDIA_EXTENSIONS = IMAGE_EXTENSIONS | VIDEO_EXTENSIONS
 def is_media(filename: str) -> bool:
     return any(filename.lower().endswith(ext) for ext in MEDIA_EXTENSIONS)
 
+def resolve_mdns(hostname: str, timeout: float = 5.0) -> str:
+    """Resolve a .local mDNS hostname to an IP address."""
+    import socket
+    if not hostname.endswith(".local"):
+        return socket.gethostbyname(hostname)
+
+    from zeroconf import Zeroconf
+    from zeroconf._utils.ipaddress import get_ip_address_object_from_record
+    import time
+
+    name = hostname.removesuffix(".local")
+    zc = Zeroconf()
+    deadline = time.time() + timeout
+    try:
+        while time.time() < deadline:
+            info = zc.get_service_info("_smb._tcp.local.", f"{name}._smb._tcp.local.")
+            if info and info.addresses:
+                return socket.inet_ntoa(info.addresses[0])
+            # Fall back to raw A record lookup
+            record = zc.cache.get_by_details(f"{hostname}.", "A", "IN")
+            if record:
+                return get_ip_address_object_from_record(record).compressed
+            time.sleep(0.1)
+    finally:
+        zc.close()
+
+    raise ConnectionError(f"Could not resolve mDNS hostname: {hostname}")
+
 
 class SMBClient:
     @v_call
@@ -44,6 +72,7 @@ class SMBClient:
         password: str = "",
         remote_name: str | None = None,
         my_name: str | None = None,
+        use_ntlm_v2: bool = False
     ) -> None:
         if not HAS_PYSMB:
             raise ImportError("pysmb is not installed. Run: pip install pysmb")
@@ -53,29 +82,34 @@ class SMBClient:
         self.remote_name = remote_name or host.split(".")[0].upper()
         self.my_name = my_name or socket.gethostname()
         self.conn: SMBConnection | None = None
+        self.use_ntlm_v2 = use_ntlm_v2
 
     @v_call
     def connect(self) -> None:
-        """Create and authenticate SMBConnection."""
-        self.conn = SMBConnection(
-            username=self.username,
-            password=self.password,
-            my_name=self.my_name,
-            remote_name=self.remote_name,
-            use_ntlm_v2=False,
-            is_direct_tcp=False,
-        )
-
         try:
-            host_ip = socket.gethostbyname(self.host)
+            host_ip = resolve_mdns(self.host)
+            print(f"host_ip = {host_ip}")
         except socket.gaierror:
             host_ip = self.host
 
-        connected = self.conn.connect(host_ip, port=139, timeout=15)
-        if not connected:
-            connected = self.conn.connect(host_ip, port=445, timeout=15)
-        if not connected:
-            raise ConnectionError(f"Could not connect to SMB host: {self.host}")
+        for is_direct, port in [(False, 139), (True, 445)]:
+            conn = SMBConnection(
+                username=self.username,
+                password=self.password,
+                my_name=self.my_name,
+                remote_name=self.remote_name,
+                use_ntlm_v2=self.use_ntlm_v2,
+                is_direct_tcp=is_direct,
+            )
+            try:
+                if conn.connect(host_ip, port=port, timeout=15):
+                    self.conn = conn
+                    return
+            except Exception as e:
+                print(e)
+                continue
+
+        raise ConnectionError(f"Could not connect to SMB host: {self.host}")
 
     @v_call
     def close(self) -> None:
@@ -131,6 +165,7 @@ class SMBClient:
                 if subtree is not None:          # only include dirs with media
                     node[name] = subtree
             else:
+                print(name)
                 if filter_fn(name):
                     node[name] = child_url
 
@@ -177,3 +212,10 @@ class SMBClient:
         else:
             raise TypeError("data must be bytes, str, or a file-like object with read()")
         return self.conn.storeFile(share, path, file_obj, timeout)
+
+    @v_call
+    def get_attributes(self, share: str, path: str, timeout: int = 30) -> Any:
+        """Get attributes of a file or directory on the SMB server."""
+        if not self.conn:
+            raise RuntimeError("SMBClient is not connected. Call connect() first.")
+        return self.conn.getAttributes(share, path, timeout)

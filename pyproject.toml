@@ -9,5 +9,6 @@ dependencies = [
     "pillow>=12.2.0",
     "pysmb>=1.2.14",
     "pydantic>=2.0.0",
+    "zeroconf>=0.150.0",
 ]
 
