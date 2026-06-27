@@ -24,14 +24,7 @@ from PIL import Image
 from PIL.ExifTags import TAGS, GPSTAGS
 from geopy.geocoders import Nominatim
 from geopy.exc import GeocoderTimedOut, GeocoderServiceError
-
-try:
-    from smb.SMBConnection import SMBConnection
-    HAS_PYSMB = True
-except ImportError:
-    class SMBConnection:
-        pass
-    HAS_PYSMB = False
+from smb_client import SMBClient
 
 # Decorator to validate call arguments and return values with arbitrary type support
 v_call = validate_call(config=ConfigDict(arbitrary_types_allowed=True), validate_return=True)
@@ -43,15 +36,14 @@ v_call = validate_call(config=ConfigDict(arbitrary_types_allowed=True), validate
 def read_smb_file(smb_url: str) -> io.BytesIO:
     """
     Parse an smb:// URL and return the remote file as an in-memory BytesIO buffer.
-    Connects as a guest/anonymous user — no credentials required.
+    Connects using SMBConnection, supporting optional credentials in the URL.
 
-    URL format:  smb://hostname/share/path/to/file.jpg
+    URL format:  smb://[user:pass@]hostname/share/path/to/file.jpg
     """
-    if not HAS_PYSMB:
-        raise ImportError("pysmb is not installed. Run: pip install pysmb")
-
     parsed = urlparse(smb_url)
     host = parsed.hostname
+    username = parsed.username or ""
+    password = parsed.password or ""
 
     # Split /share/rest/of/path
     path_parts = parsed.path.lstrip("/").split("/", 1)
@@ -62,34 +54,13 @@ def read_smb_file(smb_url: str) -> io.BytesIO:
     share, file_path = path_parts
     file_path = "/" + file_path  # pysmb expects a leading slash on the path
 
-    # Resolve hostname to IP (pysmb needs the IP for the connection)
-    try:
-        host_ip = socket.gethostbyname(host)
-    except socket.gaierror:
-        host_ip = host  # fall back; let pysmb handle the error
-
-    # Guest / anonymous login: empty username + password, SMB1 enabled
-    conn = SMBConnection(
-        username="",
-        password="",
-        my_name=socket.gethostname(),
-        remote_name=host,
-        use_ntlm_v2=False,   # many old devices only support NTLMv1
-        is_direct_tcp=False,  # use NetBIOS over TCP (port 139) for old devices
-    )
-
-    connected = conn.connect(host_ip, port=139, timeout=15)
-    if not connected:
-        # Fall back to direct TCP (port 445) in case the device supports it
-        connected = conn.connect(host_ip, port=445, timeout=15)
-    if not connected:
-        raise ConnectionError(f"Could not connect to SMB host: {host}")
-
     buf = io.BytesIO()
-    try:
-        conn.retrieveFile(share, file_path, buf)
-    finally:
-        conn.close()
+    client = SMBClient(host=host, username=username, password=password)
+    with client:
+        if client.conn is not None:
+            client.conn.retrieveFile(share, file_path, buf)
+        else:
+            raise RuntimeError("SMB Connection failed.")
 
     buf.seek(0)
     return buf
