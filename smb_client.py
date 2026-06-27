@@ -1,3 +1,4 @@
+import io
 import socket
 import sys
 from typing import Any, Callable
@@ -134,3 +135,45 @@ class SMBClient:
                     node[name] = child_url
 
         return node if node else None            # prune empty dirs
+
+    @v_call
+    def create_directory(self, share: str, path: str, timeout: int = 30) -> None:
+        """Create a new directory on the remote SMB server."""
+        if not self.conn:
+            raise RuntimeError("SMBClient is not connected. Call connect() first.")
+        self.conn.createDirectory(share, path, timeout)
+
+    @v_call
+    def read_file(self, share: str, path: str, file_obj: Any = None, timeout: int = 30) -> bytes | tuple[Any, int]:
+        """
+        Retrieve a file from the SMB server.
+        If file_obj is None, returns the file contents as bytes.
+        Otherwise, writes to file_obj and returns the tuple (file_attributes, filesize).
+        """
+        if not self.conn:
+            raise RuntimeError("SMBClient is not connected. Call connect() first.")
+        if file_obj is None:
+            buf = io.BytesIO()
+            self.conn.retrieveFile(share, path, buf, timeout)
+            buf.seek(0)
+            return buf.read()
+        return self.conn.retrieveFile(share, path, file_obj, timeout)
+
+    @v_call
+    def write_file(self, share: str, path: str, data: Any, timeout: int = 30) -> int:
+        """
+        Write a file to the SMB server.
+        data can be bytes, a string, or a file-like object with a read method.
+        Returns the number of bytes written.
+        """
+        if not self.conn:
+            raise RuntimeError("SMBClient is not connected. Call connect() first.")
+        if isinstance(data, str):
+            file_obj = io.BytesIO(data.encode('utf-8'))
+        elif isinstance(data, bytes):
+            file_obj = io.BytesIO(data)
+        elif hasattr(data, 'read'):
+            file_obj = data
+        else:
+            raise TypeError("data must be bytes, str, or a file-like object with read()")
+        return self.conn.storeFile(share, path, file_obj, timeout)
